@@ -1063,6 +1063,26 @@ func fetchFromSkillsSh(httpClient *http.Client, rawURL string) (*importedSkill, 
 			break
 		}
 	}
+	// A skill is often packaged under plugins/<plugin>/skills/<name>/ even in
+	// repos whose root is something else entirely (a website, a monorepo). Such
+	// repos frequently mirror a copy of SKILL.md at the repository root next to
+	// build output, deploy config, and demo assets (e.g. tw93/kami). Accepting
+	// that root copy would make collectGitHubFiles swallow the whole site, so
+	// prefer the lean packaged copy under plugins/ before the root fast-path.
+	if skillMdBody == nil {
+		paths, err := listGitHubSkillMdPaths(httpClient, owner, repo, "plugins", defaultBranch)
+		if err != nil {
+			slog.Warn("skills.sh import: failed to list plugins/ for packaged skill", "owner", owner, "repo", repo, "error", err)
+		} else {
+			preferred, remaining := partitionSkillMdPaths(skillName, paths)
+			if dir, body, ok := findMatchingSkillDirByFrontmatter(httpClient, rawPrefix, skillName, preferred); ok {
+				skillMdBody, skillDir = body, dir
+			} else if dir, body, ok := findMatchingSkillDirByFrontmatter(httpClient, rawPrefix, skillName, remaining); ok {
+				skillMdBody, skillDir = body, dir
+			}
+		}
+	}
+
 	// Single-skill repos place SKILL.md at the repository root. Try it as a
 	// fast path before the tree-listing fallback to avoid a recursive tree
 	// API call for a common case. Verify the frontmatter name matches so a
@@ -1190,6 +1210,29 @@ func resolveGitHubSkillDirByName(httpClient *http.Client, owner, repo, defaultBr
 	return "", nil, fmt.Errorf("repository %s/%s tree is too large to scan exhaustively for skill %s", owner, repo, skillName)
 }
 
+// isNonSkillDir reports whether a directory name is version-control, dependency,
+// build-output, or editor tooling that never holds skill content. Skipping these
+// during recursive collection keeps unrelated files — a website repo's build
+// artifacts, a monorepo's vendored deps — out of an imported skill bundle so
+// they don't consume the per-bundle file/byte budget.
+func isNonSkillDir(name string) bool {
+	switch strings.ToLower(name) {
+	case
+		// version control / CI
+		".git", ".github", ".gitlab", ".circleci", ".hg", ".svn",
+		// dependencies
+		"node_modules", "vendor", ".venv", "venv", "__pycache__",
+		".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
+		// build output / framework caches
+		"dist", "build", "out", "target", ".next", ".nuxt",
+		".svelte-kit", ".vercel", ".netlify", ".turbo", ".cache",
+		// editor tooling
+		".idea", ".vscode":
+		return true
+	}
+	return false
+}
+
 // collectGitHubFiles recursively collects file entries from a GitHub directory listing.
 func collectGitHubFiles(httpClient *http.Client, entries []githubContentEntry, out *[]githubContentEntry, parentURL string) {
 	for _, entry := range entries {
@@ -1200,6 +1243,10 @@ func collectGitHubFiles(httpClient *http.Client, entries []githubContentEntry, o
 		if entry.Type == "file" {
 			*out = append(*out, entry)
 		} else if entry.Type == "dir" {
+			if isNonSkillDir(entry.Name) {
+				slog.Info("skill import: skipping non-skill directory", "dir", entry.Name)
+				continue
+			}
 			// Fetch subdirectory contents
 			subURL := entry.URL
 			if subURL == "" {

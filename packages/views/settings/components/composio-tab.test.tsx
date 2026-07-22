@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { StrictMode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "@multica/core/i18n/react";
 import enCommon from "../../locales/en/common.json";
 import enSettings from "../../locales/en/settings.json";
@@ -64,6 +65,12 @@ vi.mock("sonner", () => ({
   toast: { success: mockToastSuccess, error: mockToastError },
 }));
 
+const mockOpenExternal = vi.hoisted(() => vi.fn());
+vi.mock("../../platform", () => ({
+  openExternal: mockOpenExternal,
+}));
+
+import { api } from "@multica/core/api";
 import { ComposioTab } from "./composio-tab";
 
 function renderTab() {
@@ -178,6 +185,30 @@ describe("ComposioTab", () => {
       expect(mockToastError).toHaveBeenCalledWith(enSettings.composio.toast_connect_failed);
     });
     expect(mockReplace).toHaveBeenCalledWith("/acme/settings?tab=integrations");
+  });
+
+  it("hands the consent URL to openExternal instead of navigating the window", async () => {
+    // In the Electron shell a `window.location.href` assignment to a foreign
+    // origin is blocked by the main-process navigation guard, so the consent
+    // page silently never opens. The connect flow must route through the
+    // platform openExternal helper (system browser on desktop, new tab on web).
+    vi.mocked(api.beginComposioConnect).mockResolvedValue({
+      redirect_url: "https://connect.composio.dev/link/lk_test",
+    });
+    renderTab();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: new RegExp(enSettings.composio.connect) }));
+    await waitFor(() => {
+      expect(mockOpenExternal).toHaveBeenCalledWith("https://connect.composio.dev/link/lk_test");
+    });
+    // The page no longer unloads, so the pending state must reset — the button
+    // is enabled again for a retry rather than spinning forever.
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: new RegExp(enSettings.composio.connect) }),
+      ).toBeEnabled();
+    });
+    expect(mockToastError).not.toHaveBeenCalled();
   });
 
   it("fires the success callback exactly once under StrictMode double-invoke", async () => {

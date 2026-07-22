@@ -27,6 +27,7 @@ import type { ComposioToolkit } from "@multica/core/types";
 import { ComposioToolkitLogo } from "../../common/composio-toolkit-logo";
 import { useT, useTimeAgo } from "../../i18n";
 import { useNavigation } from "../../navigation";
+import { openExternal } from "../../platform";
 
 // ComposioTab renders the connectable Composio toolkit catalog and lets the
 // user connect / disconnect the apps their agents can act on.
@@ -150,11 +151,16 @@ export function ComposioTab() {
     setConnectingSlug(tk.slug);
     try {
       const { redirect_url } = await api.beginComposioConnect(tk.slug);
-      // Hand the browser to Composio's hosted consent flow; it redirects back
-      // to /api/integrations/composio/callback when done.
-      window.location.href = redirect_url;
+      // Hand the consent flow to the system browser (new tab on web). A plain
+      // `window.location.href` assignment to a foreign origin is blocked by
+      // the desktop shell's navigation guard, so the page would never open.
+      // The callback lands on the web origin with ?connected=<slug>; this
+      // window picks the new connection up on the next focus refetch.
+      openExternal(redirect_url);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t(($) => $.composio.connect_failed));
+    } finally {
+      // The document no longer unloads, so always release the pending state.
       setConnectingSlug(null);
     }
   }
